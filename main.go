@@ -1,16 +1,3 @@
-package main
-
-import (
-	"database/sql"
-	"log"
-	"net/http"
-
-	"github.com/gin-gonic/gin"
-	_ "github.com/go-sql-driver/mysql"
-)
-
-var db *sql.DB
-
 func main() {
 	var err error
 	db, err = sql.Open("mysql", "user:password@tcp(127.0.0.1:3306)/cetec")
@@ -22,36 +9,72 @@ func main() {
 	router := gin.Default()
 
 	router.GET("/person/:person_id/info", getPersonInfo)
+	router.POST("/person/create", createPerson)
 
 	router.Run(":8080")
 }
 
-type PersonInfo struct {
-	Name        string `json:"name"`
-	PhoneNumber string `json:"phone_number"`
-	City        string `json:"city"`
-	State       string `json:"state"`
-	Street1     string `json:"street1"`
-	Street2     string `json:"street2"`
-	ZipCode     string `json:"zip_code"`
-}
-
-func getPersonInfo(c *gin.Context) {
-	personID := c.Param("person_id")
-
+func createPerson(c *gin.Context) {
 	var info PersonInfo
-	err := db.QueryRow(`
-        SELECT p.name, ph.number, a.city, a.state, a.street1, a.street2, a.zip_code 
-        FROM person p
-        JOIN phone ph ON p.id = ph.person_id
-        JOIN address_join aj ON p.id = aj.person_id
-        JOIN address a ON aj.address_id = a.id
-        WHERE p.id = ?`, personID).Scan(&info.Name, &info.PhoneNumber, &info.City, &info.State, &info.Street1, &info.Street2, &info.ZipCode)
+	if err := c.BindJSON(&info); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
+	tx, err := db.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, info)
+	res, err := tx.Exec("INSERT INTO person(name, age) VALUES(?, ?)", info.Name, 0) // Assuming age is not provided
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	personID, err := res.LastInsertId()
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	_, err = tx.Exec("INSERT INTO phone(number, person_id) VALUES(?, ?)", info.PhoneNumber, personID)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	res, err = tx.Exec("INSERT INTO address(city, state, street1, street2, zip_code) VALUES(?, ?, ?, ?, ?)", info.City, info.State, info.Street1, info.Street2, info.ZipCode)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	addressID, err := res.LastInsertId()
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	_, err = tx.Exec("INSERT INTO address_join(person_id, address_id) VALUES(?, ?)", personID, addressID)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Person created successfully"})
 }
